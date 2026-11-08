@@ -1,0 +1,14 @@
+{
+  "name": "Marina Dizionario",
+  "short_name": "Dizionario",
+  "description": "Imparare le parole italiane: schede, modalità «Impara», test e coppie.",
+  "lang": "it",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F9D1D9",
+  "theme_color": "#838F58",
+  "icons": [
+    {"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}
