@@ -413,7 +413,7 @@ body:has(.nbwrap){padding-bottom:max(12px,env(safe-area-inset-bottom,0px))}
 'use strict';
 const KEY='marina-slovarik.v1';
 /* общий прогресс (облако): переменные объявлены заранее, чтобы save() работал с первой секунды */
-let rdoc=null,rcan=false,rtimer=0,rbusy=false,rdirty=false,rlast='',pendingR=null,syncState='wait',sampleFn=null;
+let fbAuth=null,fbDb=null,fbUser=null,pushT=0,pushBusy=false,pushDirty=false,pendingR=null,syncState='wait',sampleFn=null,allowDrop=false;
 const $app=document.getElementById('app');
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>Math.random().toString(36).slice(2,9);
@@ -453,8 +453,8 @@ BUILTIN.forEach(b=>{
   data.sets.push({id:b.id,name:b.name,dir:'dt',best:null,cards:b.cards.map(c=>({id:c.id,t:c.t,d:c.d,x:c.x||'',lvl:oldLvl[c.id]||0}))});
 });
 try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}
-const saveLocal=()=>{try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}};
-const save=()=>{saveLocal();scheduleRemote()};
+const saveLocal=keep=>{if(keep!==true)data.savedAt=Date.now();try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}if(keep!==true)scheduleRemote()};
+const save=()=>saveLocal();
 const getSet=id=>data.sets.find(s=>s.id===id);
 
 /* ---------- звук «дынь» ---------- */
@@ -1112,6 +1112,7 @@ function render(){
   else if(V.view==='notebook')h=`<div class="top nbtop">${back('home','Set')}<h1>Quaderno 🩷</h1><span class="grow"></span><button class="btn sm" data-act="nbeditcur">✎ Modifica pagina</button><button class="btn sm primary" data-act="nbadd">＋ Nuova pagina</button></div>${notebookView()}`;
   else if(V.view==='nbedit'&&NE)h=nbEditView();
   else if(V.view==='listen')h=listenView();
+  else if(V.view==='account')h=accountView();
   else if(V.view==='play'){
     h=({cards:cardsView,learn:learnView,test:testView,match:matchView,gems:gemsView,blast:blastView,blocks:blocksView})[S.m]();
   }
@@ -1345,7 +1346,7 @@ function progressView(){
     <div class="cal"><span></span>${dows.map(x=>`<span class="cdh">${x}</span>`).join('')}${cal}</div>
     <div class="row small muted"><span class="lg"><i style="background:var(--ok)"></i>4–5 abilità</span><span class="lg"><i style="background:var(--warn)"></i>2–3 abilità</span><span class="lg"><i style="background:var(--bad)"></i>0–1 abilità</span><span class="lg"><i style="background:var(--line)"></i>in arrivo</span></div></div>
   <div class="panel stack"><h2>Salvataggio dei progressi</h2>
-    <div class="small muted">Tutto è salvato in questo browser su questo dispositivo. Una volta a settimana premi «Salva copia»: il file si può ricaricare se i dati spariscono o se apri il sito su un altro dispositivo.</div>
+    <div class="small muted">${fbUser?'Tutto è salvato nel cloud, con il tuo account, e su questo dispositivo. «Salva copia» resta come copia di sicurezza.':'Tutto è salvato in questo browser su questo dispositivo. Per ritrovarlo su ogni dispositivo accedi dalla schermata principale (☁️). In più, ogni tanto premi «Salva copia»: il file si può ricaricare se i dati spariscono.'}</div>
     <div class="row"><button class="btn sm" data-act="bkexp">Salva copia</button><label class="btn sm" for="bkfile" style="display:inline-flex;align-items:center">Carica copia</label><input id="bkfile" type="file" accept="application/json,.json" hidden></div></div>`;
 }
 
@@ -1993,7 +1994,7 @@ Object.assign(A,{
   listen:()=>go('listen'),
   theme:()=>{
     const i=THEMES.indexOf(THEMES.includes(data.theme)?data.theme:'auto');
-    data.theme=THEMES[(i+1)%3];saveLocal();applyTheme();render();toast('Tema: '+THEME_NAME[data.theme]);
+    data.theme=THEMES[(i+1)%3];saveLocal(true);applyTheme();render();toast('Tema: '+THEME_NAME[data.theme]);
   },
   lkgo:()=>{
     const el=document.getElementById('lk-url'),id=ytId(el&&el.value);
@@ -2139,101 +2140,149 @@ document.addEventListener('pointerup',e=>{
   if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.5)A.pnav({d:dx<0?1:-1});
 });
 
-/* ---------- общий прогресс через db ---------- */
-const builtinIds=new Set(BUILTIN.map(b=>b.id));
-const canon=o=>JSON.stringify(o,(k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.keys(v).sort().reduce((a,x)=>(a[x]=v[x],a),{}):v);
+/* ---------- облако: Firebase (вход + сохранение прогресса) ---------- */
+const FB_CONFIG={apiKey:"AIzaSyDt17ngCw9v7CbgpmaD4CLPjdTwWSZYlxQ",authDomain:"marina-dizionario.firebaseapp.com",projectId:"marina-dizionario",storageBucket:"marina-dizionario.firebasestorage.app",messagingSenderId:"640468625696",appId:"1:640468625696:web:1766f7e8d8646890660f45"};
+const SKIP_SYNC=['theme'];
+function markReset(st){st.resetAt=Date.now()}
+function applyPending(){pendingR=null}
+function stateOut(){const o=JSON.parse(JSON.stringify(data));SKIP_SYNC.forEach(k=>delete o[k]);return o}
+function hasContent(){
+  return data.sets.some(s=>!BUILTIN.some(b=>b.id===s.id)||s.cards.some(c=>c.lvl>0))
+    ||Object.keys(data.track||{}).length>0||(data.myTopics||[]).length>0
+    ||Object.keys(data.nbOver||{}).length>0||(data.listen||[]).length>0;
+}
 function syncLine(){
-  const t={cloud:'I progressi sono salvati nel cloud e uguali su tutti i tuoi dispositivi.',
-    view:'Stai vedendo i progressi della proprietaria. I tuoi restano solo su questo dispositivo.',
-    local:'I progressi sono salvati su questo dispositivo. Puoi salvare una copia nella schermata «I miei progressi».',
-    error:'Impossibile salvare nel cloud. I progressi sono salvati su questo dispositivo.'}[syncState];
-  return t?`<p class="small muted" style="margin:0" id="syncline">${t}</p>`:'';
+  if(syncState==='out')return `<div class="panel row" style="align-items:center;gap:12px"><span class="small muted" style="flex:1;min-width:0">☁️ Accedi per salvare i progressi nel cloud e ritrovarli su ogni dispositivo</span><button class="btn sm primary" data-act="acc">Accedi</button></div>`;
+  if(syncState==='cloud'&&fbUser)return `<div class="row" style="align-items:center;gap:10px"><span class="small muted" id="syncline" style="flex:1;min-width:0">☁️ Salvato nel cloud · ${esc(fbUser.email||'')}</span><button class="btn sm ghost" data-act="acc">Account</button></div>`;
+  if(syncState==='error')return `<div class="row" style="align-items:center;gap:10px"><span class="small muted" id="syncline" style="flex:1;min-width:0">Impossibile salvare nel cloud. I progressi sono salvati su questo dispositivo.</span><button class="btn sm ghost" data-act="acc">Account</button></div>`;
+  return '';
 }
-function setSync(s){syncState=s;if(V.view==='home')render()}
-function stateOut(){
-  const lvl={},meta={};
-  data.sets.forEach(s=>{
-    s.cards.forEach(c=>{if(c.lvl)lvl[c.id]=c.lvl});
-    meta[s.id]={resetAt:s.resetAt||0,dir:s.dir||'dt',best:s.best||null,gemBest:s.gemBest||null,blastBest:s.blastBest||null,blocksBest:s.blocksBest||null};
-  });
-  return {v:1,lvl,meta,custom:data.sets.filter(s=>!builtinIds.has(s.id)),mute:!!data.mute};
-}
-const sumLvl=o=>Object.values((o&&o.lvl)||{}).reduce((a,v)=>a+(v||0),0);
-let allowDrop=false;
-function markReset(st){st.resetAt=Date.now();allowDrop=true}
-/* Объединение с облаком: уровень слова никогда не уменьшается из-за чужих данных.
-   Уменьшить прогресс набора может только явный сброс («Начать заново»), он помечается resetAt. */
-function applyRemote(r){
-  if(!r||r.v!==1)return;
-  const customs=Array.isArray(r.custom)?r.custom:[];
-  const keep=data.sets.filter(s=>builtinIds.has(s.id));
-  const mine=data.sets.filter(s=>!builtinIds.has(s.id));
-  customs.forEach(c=>{if(!mine.some(m=>m.id===c.id))mine.push(c)});
-  data.sets=[...keep,...mine];
-  data.sets.forEach(s=>{
-    const m=r.meta&&r.meta[s.id];
-    const rr=(m&&m.resetAt)||0,reset=rr>(s.resetAt||0);
-    s.cards.forEach(c=>{const v=(r.lvl&&r.lvl[c.id])||0;c.lvl=reset?v:Math.max(c.lvl||0,v)});
-    if(reset)s.resetAt=rr;
-    if(m){
-      const mx=(a,b)=>Math.max(a||0,b||0)||null;
-      s.gemBest=mx(s.gemBest,m.gemBest);
-      s.blastBest=mx(s.blastBest,m.blastBest);
-      s.blocksBest=mx(s.blocksBest,m.blocksBest);
-      s.best=(s.best&&m.best)?Math.min(s.best,m.best):(s.best||m.best||null);
-    }
-  });
-  saveLocal();
-}
-function applyPending(){const r=pendingR;pendingR=null;if(r){applyRemote(r);rlast=canon(r);if(rcan&&canon(stateOut())!==rlast){rdirty=true;scheduleRemote()}}}
+function setSync(s){if(syncState===s)return;syncState=s;if(V.view==='home')render()}
 function scheduleRemote(){
-  if(!rdoc||!rcan)return;
-  rdirty=true;clearTimeout(rtimer);rtimer=setTimeout(pushRemote,900);
+  if(!fbUser||!fbDb)return;
+  pushDirty=true;clearTimeout(pushT);pushT=setTimeout(pushRemote,1500);
 }
 async function pushRemote(){
-  rtimer=0;
-  if(!rdoc||!rcan||rbusy||!rdirty)return;
-  rbusy=true;rdirty=false;
-  const out=stateOut();
-  if(!allowDrop&&rlast){let prev=null;try{prev=JSON.parse(rlast)}catch(e){}
-    if(prev&&sumLvl(prev)>=6&&sumLvl(out)<sumLvl(prev)*0.6){rbusy=false;setSync('error');return}}
-  try{await rdoc.set(out);allowDrop=false;rlast=canon(out);if(syncState!=='cloud')setSync('cloud')}
-  catch(e){setSync('error')}
-  rbusy=false;
-  if(rdirty)scheduleRemote();
+  pushT=0;
+  if(!fbUser||!fbDb||pushBusy||!pushDirty)return;
+  pushBusy=true;pushDirty=false;
+  try{
+    await fbDb.collection('users').doc(fbUser.uid).set({data:JSON.stringify(stateOut()),savedAt:data.savedAt||Date.now(),email:fbUser.email||''});
+    setSync('cloud');
+  }catch(e){setSync('error')}
+  pushBusy=false;
+  if(pushDirty)scheduleRemote();
 }
+async function pullRemote(){
+  if(!fbUser||!fbDb)return;
+  let snap;
+  try{snap=await fbDb.collection('users').doc(fbUser.uid).get()}catch(e){setSync('error');return}
+  if(!snap.exists){pushDirty=true;await pushRemote();return}
+  const r=snap.data(),rt=r.savedAt||0,lt=data.savedAt||0;
+  if(rt>lt||(rt>0&&!hasContent())){
+    let o=null;try{o=JSON.parse(r.data)}catch(e){}
+    if(o&&Array.isArray(o.sets)){
+      try{localStorage.setItem(KEY+'.backup',localStorage.getItem(KEY)||'')}catch(e){}
+      o.theme=data.theme;o.savedAt=rt;
+      try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){setSync('error');return}
+      location.reload();
+      return;
+    }
+  }
+  if(lt>rt){pushDirty=true;await pushRemote()}
+  setSync('cloud');
+}
+const accMsg=(t,ok)=>{const m=document.getElementById('accmsg');if(m){m.textContent=t;m.style.color=ok?'var(--ok)':'var(--bad)'}};
+const ACC_ERR={
+  'auth/invalid-email':'Email non valida.',
+  'auth/missing-email':'Scrivi la tua email.',
+  'auth/missing-password':'Scrivi la password.',
+  'auth/weak-password':'Password troppo corta: almeno 6 caratteri.',
+  'auth/email-already-in-use':'Esiste già un account con questa email: premi «Accedi».',
+  'auth/invalid-credential':'Email o password non corretti.',
+  'auth/wrong-password':'Email o password non corretti.',
+  'auth/user-not-found':'Email o password non corretti.',
+  'auth/too-many-requests':'Troppi tentativi, riprova tra qualche minuto.',
+  'auth/network-request-failed':'Nessuna connessione a internet.',
+  'auth/popup-closed-by-user':'Accesso annullato.',
+  'auth/cancelled-popup-request':'Accesso annullato.',
+  'auth/popup-blocked':'Il browser ha bloccato la finestra: usa email e password.',
+  'auth/unauthorized-domain':'Questo indirizzo non è autorizzato in Firebase.',
+  'auth/operation-not-allowed':'Questo tipo di accesso non è attivo.'
+};
+const accErr=e=>ACC_ERR[e&&e.code]||('Qualcosa è andato storto'+(e&&e.code?' ('+e.code+')':'')+'.');
+const accVals=()=>({em:(document.getElementById('acc-em')||{}).value||'',pw:(document.getElementById('acc-pw')||{}).value||''});
+function accountView(){
+  if(fbUser){
+    return `<div class="top">${back('home')}<h1>Account ☁️</h1></div>
+    <div class="panel stack"><p>Accesso effettuato come <b>${esc(fbUser.email||fbUser.displayName||'')}</b>.</p>
+    <p class="small muted">Parole, diario dei progressi e quaderno vengono salvati nel cloud. Su un altro dispositivo basta accedere con lo stesso account.</p>
+    <button class="btn" data-act="accsync">Sincronizza adesso</button>
+    <button class="btn ghost" data-act="accout">Esci</button>
+    <div class="small" id="accmsg" role="status"></div></div>`;
+  }
+  return `<div class="top">${back('home')}<h1>Accedi ☁️</h1></div>
+  <div class="panel stack"><p class="muted">Accedi per salvare tutto nel cloud: parole, diario e quaderno. Su un altro dispositivo basta accedere con lo stesso account.</p>
+  <button class="btn primary" data-act="accgoogle">Continua con Google</button>
+  <div class="small muted" style="text-align:center">oppure con la mail</div>
+  <input class="inp" id="acc-em" type="email" placeholder="Email" autocomplete="email" inputmode="email" autocapitalize="off">
+  <input class="inp" id="acc-pw" type="password" placeholder="Password (almeno 6 caratteri)" autocomplete="current-password">
+  <div class="row"><button class="btn primary" data-act="accin">Accedi</button><button class="btn" data-act="accnew">Crea account</button></div>
+  <button class="btn sm ghost" data-act="accreset">Password dimenticata?</button>
+  <div class="small" id="accmsg" role="status"></div></div>`;
+}
+Object.assign(A,{
+  acc:()=>go('account'),
+  accgoogle:async()=>{
+    if(!fbAuth){accMsg('Servizio non disponibile: controlla la connessione.');return}
+    try{await fbAuth.signInWithPopup(new firebase.auth.GoogleAuthProvider())}catch(e){accMsg(accErr(e))}
+  },
+  accin:async()=>{
+    if(!fbAuth){accMsg('Servizio non disponibile: controlla la connessione.');return}
+    const v=accVals();
+    try{await fbAuth.signInWithEmailAndPassword(v.em.trim(),v.pw)}catch(e){accMsg(accErr(e))}
+  },
+  accnew:async()=>{
+    if(!fbAuth){accMsg('Servizio non disponibile: controlla la connessione.');return}
+    const v=accVals();
+    try{await fbAuth.createUserWithEmailAndPassword(v.em.trim(),v.pw)}catch(e){accMsg(accErr(e))}
+  },
+  accreset:async()=>{
+    if(!fbAuth){accMsg('Servizio non disponibile: controlla la connessione.');return}
+    const v=accVals();
+    if(!v.em.trim()){accMsg('Scrivi la tua email e premi di nuovo.');return}
+    try{await fbAuth.sendPasswordResetEmail(v.em.trim());accMsg('Ti ho mandato una mail per cambiare la password.',true)}catch(e){accMsg(accErr(e))}
+  },
+  accout:async()=>{try{await fbAuth.signOut()}catch(e){}go('home')},
+  accsync:async()=>{
+    accMsg('Sincronizzo…',true);
+    pushDirty=true;await pushRemote();await pullRemote();
+    if(V.view==='account')accMsg(syncState==='error'?'Non riesco a salvare nel cloud.':'Tutto salvato nel cloud ✓',syncState!=='error');
+  }
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&e.target&&e.target.id==='acc-pw'){e.preventDefault();A.accin()}
+});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&fbUser&&V.view==='home'&&!pushT&&!pushBusy)pullRemote();
+});
+const loadScript=src=>new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=no;document.head.appendChild(s)});
 async function initSync(){
-  let db=null,user=null;
-  try{sampleFn=await claude.use('sample')}catch(e){}
-  try{db=await claude.use('db');user=await claude.use('user')}catch(e){}
-  if(!db){setSync('local');return}
-  try{rcan=!!(user&&user.canEdit&&await user.canEdit())}catch(e){rcan=false}
-  rdoc=db.doc('progress/main');
-  let first=true;
-  rdoc.onSnapshot(snap=>{
-    if(snap.metadata.hasPendingWrites)return;
-    const wasFirst=first;first=false;
-    if(!snap.exists){
-      if(rcan){setSync('cloud');rdirty=true;pushRemote()}else setSync('local');
-      return;
-    }
-    if(rdirty||rbusy||rtimer)return;
-    const r=JSON.parse(JSON.stringify(snap.data()));
-    if(!rcan){
-      if(wasFirst){pendingR=r;setSync('view');if(V.view==='home'||V.view==='set'){applyPending();render()}}
-      return;
-    }
-    if(wasFirst){
-      applyRemote(r);
-      if(canon(stateOut())!==canon(r)){rdirty=true;pushRemote()}else rlast=canon(r);
-      setSync('cloud');if(V.view==='set')render();
-      return;
-    }
-    if(canon(r)===rlast)return;
-    pendingR=r;setSync('cloud');
-    if(V.view==='home'||V.view==='set'){applyPending();render()}
-  },()=>{setSync(rcan?'error':'local')});
-  setTimeout(()=>{if(syncState==='wait')setSync('local')},10000);
+  try{if(typeof claude!=='undefined'&&claude.use)sampleFn=await claude.use('sample')}catch(e){}
+  try{
+    const B='https://www.gstatic.com/firebasejs/10.12.2/';
+    await loadScript(B+'firebase-app-compat.js');
+    await Promise.all([loadScript(B+'firebase-auth-compat.js'),loadScript(B+'firebase-firestore-compat.js')]);
+    firebase.initializeApp(FB_CONFIG);
+    fbAuth=firebase.auth();fbDb=firebase.firestore();
+  }catch(e){setSync('off');return}
+  fbAuth.onAuthStateChanged(u=>{
+    fbUser=u;
+    if(!u){setSync('out');if(V.view==='account')render();return}
+    setSync('cloud');
+    if(V.view==='account')go('home');
+    pullRemote();
+  });
 }
 
 render();
